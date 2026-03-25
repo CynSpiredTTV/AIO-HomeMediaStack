@@ -1,0 +1,44 @@
+services:
+  debridbridge:
+    build: .
+    container_name: debridbridge
+    restart: unless-stopped
+    ports:
+      - "${BRIDGE_PORT:-8080}:8080"
+    volumes:
+      - /DATA/Work/debridbridge/data:/data
+      - /DATA/Work/debridbridge/config:/config
+      - /DATA/Media/realdebrid:/mnt/realdebrid:rshared
+      - /DATA/Media/symlinks:/mnt/symlinks
+    devices:
+      - /dev/fuse:/dev/fuse:rwm
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    environment:
+      #------------------------------------------------------------
+      # REQUIRED — You must fill these in
+      #------------------------------------------------------------
+      - RD_API_KEY=${RD_API_KEY}
+      - SONARR_API_KEY=${SONARR_API_KEY}
+      - RADARR_API_KEY=${RADARR_API_KEY}
+      #------------------------------------------------------------
+      # AUTO-CONFIGURED — Don't change unless you know what you're doing
+      #------------------------------------------------------------
+      - SONARR_HOST=${SONARR_HOST:-http://sonarr:8989}
+      - RADARR_HOST=${RADARR_HOST:-http://radarr:7878}
+      - MOUNT_PATH=/mnt/realdebrid
+      - SYMLINK_PATH=/mnt/symlinks
+      - WEBDAV_PORT=8181
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - REPAIR_INTERVAL_HOURS=${REPAIR_INTERVAL_HOURS:-6}
+      - RD_RATE_LIMIT=${RD_RATE_LIMIT:-200}
+      - IMPORT_WORKERS=${IMPORT_WORKERS:-3}
+      - TZ=${TZ:-Europe/London}
+    networks:
+      - debrid-network
+
+networks:
+  debrid-network:
+    external: true

@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DebridBridge</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #1a1a2e; color: #e0e0e0; padding: 20px; }
+        h1 { color: #00d4ff; margin-bottom: 20px; font-size: 1.5em; }
+        h2 { color: #7b68ee; margin: 20px 0 10px; font-size: 1.1em; border-bottom: 1px solid #333; padding-bottom: 5px; }
+
+        .status-bar { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
+        .status-card { background: #16213e; border-radius: 8px; padding: 15px 20px; min-width: 180px; border: 1px solid #333; }
+        .status-card .label { font-size: 0.8em; color: #888; text-transform: uppercase; }
+        .status-card .value { font-size: 1.4em; font-weight: bold; margin-top: 5px; }
+        .status-card .value.green { color: #00ff88; }
+        .status-card .value.red { color: #ff4444; }
+        .status-card .value.yellow { color: #ffaa00; }
+
+        .gauge { width: 100%; height: 8px; background: #333; border-radius: 4px; margin-top: 8px; overflow: hidden; }
+        .gauge-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.85em; }
+        th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #2a2a4a; }
+        th { background: #16213e; color: #7b68ee; font-weight: 600; }
+        tr:hover { background: #1a1a3e; }
+
+        .badge { padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: 600; }
+        .badge-done { background: #00ff8833; color: #00ff88; }
+        .badge-pending { background: #ffaa0033; color: #ffaa00; }
+        .badge-failed { background: #ff444433; color: #ff4444; }
+        .badge-review { background: #7b68ee33; color: #7b68ee; }
+        .badge-ok { background: #00ff8833; color: #00ff88; }
+        .badge-broken { background: #ff444433; color: #ff4444; }
+
+        button { background: #7b68ee; color: white; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 0.85em; }
+        button:hover { background: #6a5acd; }
+        button.danger { background: #ff4444; }
+        button.danger:hover { background: #cc3333; }
+
+        .log-box { background: #0a0a1a; border: 1px solid #333; border-radius: 8px; padding: 15px; font-family: monospace; font-size: 0.75em; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; line-height: 1.4; }
+
+        .section { margin-bottom: 30px; }
+        .truncate { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    </style>
+</head>
+<body>
+    <h1>DebridBridge</h1>
+
+    <!-- Status Bar -->
+    <div class="status-bar" id="status-bar">
+        <div class="status-card">
+            <div class="label">RD Rate Limit</div>
+            <div class="value" id="rd-budget">--/--</div>
+            <div class="gauge"><div class="gauge-fill" id="rd-gauge" style="width:0%; background:#00ff88;"></div></div>
+        </div>
+        <div class="status-card">
+            <div class="label">Mount</div>
+            <div class="value" id="mount-status">--</div>
+        </div>
+        <div class="status-card">
+            <div class="label">Import Queue</div>
+            <div class="value" id="queue-depth">--</div>
+        </div>
+    </div>
+
+    <!-- Needs Review -->
+    <div class="section">
+        <h2>Needs Review</h2>
+        <table>
+            <thead><tr><th>Name</th><th>Category</th><th>Confidence</th><th>Actions</th></tr></thead>
+            <tbody id="review-table"></tbody>
+        </table>
+    </div>
+
+    <!-- Recent Imports -->
+    <div class="section">
+        <h2>Recent Imports</h2>
+        <table>
+            <thead><tr><th>Name</th><th>Status</th><th>Files</th><th>Added</th></tr></thead>
+            <tbody id="torrents-table"></tbody>
+        </table>
+    </div>
+
+    <!-- Symlink Health -->
+    <div class="section">
+        <h2>Symlink Health</h2>
+        <div id="symlink-counts" style="margin-bottom:10px;"></div>
+        <table>
+            <thead><tr><th>Path</th><th>Health</th><th>Torrent</th></tr></thead>
+            <tbody id="symlinks-table"></tbody>
+        </table>
+    </div>
+
+    <!-- Repair Worker -->
+    <div class="section">
+        <h2>Repair Worker</h2>
+        <div id="repair-info" style="margin-bottom:10px; font-size:0.85em; color:#888;"></div>
+        <div style="display:flex; gap:10px; align-items:center;">
+            <button onclick="triggerRepair()">Run Now</button>
+            <button onclick="toggleRepair()">Pause / Resume</button>
+        </div>
+    </div>
+
+    <!-- Logs -->
+    <div class="section">
+        <h2>Logs</h2>
+        <div class="log-box" id="log-box">Loading...</div>
+    </div>
+
+    <script>
+        const API = '/internal';
+
+        async function fetchJSON(url) {
+            const res = await fetch(url);
+            return res.json();
+        }
+
+        async function refreshStatus() {
+            try {
+                const data = await fetchJSON(API + '/status');
+                document.getElementById('rd-budget').textContent = `${data.rd_budget_used}/${data.rd_budget_max}`;
+                const pct = (data.rd_budget_used / data.rd_budget_max) * 100;
+                const gauge = document.getElementById('rd-gauge');
+                gauge.style.width = pct + '%';
+                gauge.style.background = pct > 80 ? '#ff4444' : pct > 50 ? '#ffaa00' : '#00ff88';
+
+                const mount = document.getElementById('mount-status');
+                mount.textContent = data.mount_healthy ? 'OK' : 'DOWN';
+                mount.className = 'value ' + (data.mount_healthy ? 'green' : 'red');
+
+                document.getElementById('queue-depth').textContent = data.queue_depth;
+            } catch(e) { console.error('Status fetch failed', e); }
+        }
+
+        async function refreshReview() {
+            try {
+                const data = await fetchJSON(API + '/needs-review');
+                const tbody = document.getElementById('review-table');
+                tbody.innerHTML = data.length === 0 ? '<tr><td colspan="4" style="color:#666">None</td></tr>' :
+                    data.map(r => `<tr>
+                        <td class="truncate">${esc(r.raw_name)}</td>
+                        <td>${esc(r.category)}</td>
+                        <td>${(r.confidence * 100).toFixed(0)}%</td>
+                        <td>
+                            <button onclick="approve('${r.id}')">Approve</button>
+                            <button class="danger" onclick="reject('${r.id}')">Reject</button>
+                        </td>
+                    </tr>`).join('');
+            } catch(e) { console.error('Review fetch failed', e); }
+        }
+
+        async function refreshTorrents() {
+            try {
+                const data = await fetchJSON(API + '/torrents');
+                const tbody = document.getElementById('torrents-table');
+                tbody.innerHTML = data.map(t => `<tr>
+                    <td class="truncate">${esc(t.raw_name)}</td>
+                    <td><span class="badge badge-${badgeClass(t.status)}">${t.status}</span>
+                        ${t.vd_statuses ? '<br><small>' + esc(t.vd_statuses) + '</small>' : ''}</td>
+                    <td>${t.file_count || '-'}</td>
+                    <td>${new Date(t.added_at * 1000).toLocaleString()}</td>
+                </tr>`).join('');
+            } catch(e) { console.error('Torrents fetch failed', e); }
+        }
+
+        async function refreshSymlinks() {
+            try {
+                const data = await fetchJSON(API + '/symlinks');
+                const counts = document.getElementById('symlink-counts');
+                const c = data.counts;
+                counts.innerHTML = Object.entries(c).map(([k,v]) =>
+                    `<span class="badge badge-${k === 'ok' ? 'ok' : 'broken'}">${k}: ${v}</span> `
+                ).join('');
+
+                const tbody = document.getElementById('symlinks-table');
+                tbody.innerHTML = data.broken.length === 0 ? '<tr><td colspan="3" style="color:#666">All healthy</td></tr>' :
+                    data.broken.map(s => `<tr>
+                        <td class="truncate">${esc(s.symlink_path)}</td>
+                        <td><span class="badge badge-broken">${s.health}</span></td>
+                        <td class="truncate">${esc(s.raw_name)}</td>
+                    </tr>`).join('');
+            } catch(e) { console.error('Symlinks fetch failed', e); }
+        }
+
+        async function refreshLogs() {
+            try {
+                const data = await fetchJSON(API + '/logs');
+                document.getElementById('log-box').textContent = data.lines.join('\n') || 'No logs yet';
+            } catch(e) { console.error('Logs fetch failed', e); }
+        }
+
+        async function approve(id) {
+            await fetch(API + '/approve/' + id, {method:'POST'});
+            refreshReview();
+        }
+
+        async function reject(id) {
+            await fetch(API + '/reject/' + id, {method:'POST'});
+            refreshReview();
+        }
+
+        async function triggerRepair() {
+            await fetch(API + '/repair/run', {method:'POST'});
+        }
+
+        async function toggleRepair() {
+            await fetch(API + '/repair/pause', {method:'POST'});
+        }
+
+        function badgeClass(status) {
+            if (status === 'ready' || status === 'done') return 'done';
+            if (status === 'pending') return 'pending';
+            if (status === 'failed') return 'failed';
+            if (status === 'needs_review') return 'review';
+            return 'pending';
+        }
+
+        function esc(s) {
+            if (!s) return '';
+            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        }
+
+        async function refreshRepairStatus() {
+            try {
+                const data = await fetchJSON(API + '/repair/status');
+                const info = document.getElementById('repair-info');
+                const last = data.last_run ? new Date(data.last_run * 1000).toLocaleString() : 'Never';
+                const next = data.next_run ? new Date(data.next_run * 1000).toLocaleString() : 'Not scheduled';
+                const status = data.paused ? '<span class="badge badge-failed">Paused</span>' : '<span class="badge badge-done">Active</span>';
+                info.innerHTML = `${status} &nbsp; Last run: ${last} &nbsp; Next run: ${next}`;
+            } catch(e) { console.error('Repair status fetch failed', e); }
+        }
+
+        // Refresh everything
+        function refreshAll() {
+            refreshStatus();
+            refreshReview();
+            refreshTorrents();
+            refreshSymlinks();
+            refreshRepairStatus();
+            refreshLogs();
+        }
+
+        refreshAll();
+        setInterval(refreshAll, 10000);
+    </script>
+</body>
+</html>

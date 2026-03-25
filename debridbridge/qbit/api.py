@@ -26,13 +26,22 @@ _sync_rid = 0
 # --- Auth ---
 
 @router.post("/auth/login")
-async def auth_login(
-    username: str = Form(default=""),
-    password: str = Form(default=""),
-):
-    """Always succeed — no real auth needed."""
+async def auth_login(request: Request):
+    """Always succeed — no real auth needed.
+
+    Radarr/Sonarr send username/password as form data.
+    We accept anything and return the SID cookie.
+    """
     response = PlainTextResponse("Ok.")
-    response.set_cookie("SID", _SESSION_ID, httponly=True, path="/")
+    response.set_cookie("SID", _SESSION_ID, httponly=True, path="/", samesite="none")
+    return response
+
+
+@router.get("/auth/login")
+async def auth_login_get():
+    """Some qBit clients probe with GET first."""
+    response = PlainTextResponse("Ok.")
+    response.set_cookie("SID", _SESSION_ID, httponly=True, path="/", samesite="none")
     return response
 
 
@@ -45,7 +54,46 @@ async def app_version():
 
 @router.get("/app/webapiVersion")
 async def webapi_version():
-    return PlainTextResponse("2.9.0")  # BUG-017 fix: was 2.9.3
+    return PlainTextResponse("2.9.3")
+
+
+@router.get("/app/preferences")
+async def app_preferences():
+    """Radarr/Sonarr may query preferences during connection test."""
+    return {
+        "save_path": "/downloads/",
+        "temp_path_enabled": False,
+        "temp_path": "/downloads/temp/",
+        "export_dir": "",
+        "export_dir_fin": "",
+        "max_connec": 500,
+        "max_connec_per_torrent": 100,
+        "max_uploads": -1,
+        "max_uploads_per_torrent": -1,
+        "dht": True,
+        "pex": True,
+        "lsd": True,
+        "encryption": 0,
+        "queueing_enabled": True,
+        "max_active_downloads": 5,
+        "max_active_torrents": 50,
+        "max_active_uploads": 5,
+    }
+
+
+@router.get("/transfer/info")
+async def transfer_info():
+    """Some clients check transfer info during test."""
+    return {
+        "connection_status": "connected",
+        "dht_nodes": 0,
+        "dl_info_data": 0,
+        "dl_info_speed": 0,
+        "dl_rate_limit": 0,
+        "up_info_data": 0,
+        "up_info_speed": 0,
+        "up_rate_limit": 0,
+    }
 
 
 # --- Torrents ---

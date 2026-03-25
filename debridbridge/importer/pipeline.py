@@ -1,6 +1,7 @@
 """Import pipeline — orchestrates: parse → lookup → symlink → import."""
 
 import asyncio
+import hashlib
 import logging
 import os
 import time
@@ -506,25 +507,40 @@ class ImportPipeline:
     def _get_or_create_virtual_download(
         self, infohash, category, arr_host, season, confidence
     ) -> str:
-        """Get existing or create new virtual download for this hash+season combo."""
+        """Get existing or create new virtual download for this hash+season combo.
+
+        For movies/single episodes (season=None), reuse the VD created by torrents_add.
+        For multi-season, create new VDs with season-specific qbit_hashes.
+        """
         with self.db.get_db() as conn:
-            existing = conn.execute(
-                "SELECT id FROM virtual_downloads "
-                "WHERE rd_hash = ? AND arr_category = ? AND season_number = ?",
-                (infohash, category, str(season) if season else None),
-            ).fetchone()
+            # SQL NULL comparison needs IS NULL, not = NULL
+            if season is None:
+                existing = conn.execute(
+                    "SELECT id FROM virtual_downloads "
+                    "WHERE rd_hash = ? AND arr_category = ? AND season_number IS NULL",
+                    (infohash, category),
+                ).fetchone()
+            else:
+                existing = conn.execute(
+                    "SELECT id FROM virtual_downloads "
+                    "WHERE rd_hash = ? AND arr_category = ? AND season_number = ?",
+                    (infohash, category, str(season)),
+                ).fetchone()
 
             if existing:
+                # Update status to importing
+                conn.execute(
+                    "UPDATE virtual_downloads SET status = 'importing', "
+                    "parse_confidence = ? WHERE id = ?",
+                    (confidence, existing["id"]),
+                )
                 return existing["id"]
 
+            # Create new VD (multi-season per-season entries)
             vd_id = str(uuid.uuid4())
-            qbit_hash = infohash.lower()  # Use real hash for single, generate for multi
-            if season is not None:
-                # For multi-season, generate unique qbit hashes per season
-                import hashlib
-                qbit_hash = hashlib.sha1(
-                    f"{infohash}:season:{season}".encode()
-                ).hexdigest()
+            qbit_hash = hashlib.sha1(
+                f"{infohash}:season:{season}".encode()
+            ).hexdigest()
 
             conn.execute(
                 "INSERT INTO virtual_downloads "
@@ -539,14 +555,40 @@ class ImportPipeline:
 
     def _record_symlink(self, vd_id, symlink_path, target_path, arr_host):
         with self.db.get_db() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO symlinks "
-                "(id, virtual_download_id, symlink_path, target_path, "
-                "arr_host, health, last_verified_at) "
-                "VALUES (?, ?, ?, ?, ?, 'ok', ?)",
-                (str(uuid.uuid4()), vd_id, symlink_path, target_path,
-                 arr_host, time.time()),
-            )
+            # Check if a symlink at this path already exists (from a different torrent)
+            existing = conn.execute(
+                "SELECT id, virtual_download_id FROM symlinks WHERE symlink_path = ?",
+                (symlink_path,),
+            ).fetchone()
+
+            if existing:
+                if existing["virtual_download_id"] == vd_id:
+                    # Same VD, just update the target
+                    conn.execute(
+                        "UPDATE symlinks SET target_path = ?, last_verified_at = ? WHERE id = ?",
+                        (target_path, time.time(), existing["id"]),
+                    )
+                else:
+                    # Different torrent owns this path — overwrite is fine
+                    # (e.g., second season pack for a missing episode)
+                    logger.info(
+                        "Symlink %s reassigned from VD %s to VD %s (overlapping pack)",
+                        symlink_path, existing["virtual_download_id"][:8], vd_id[:8],
+                    )
+                    conn.execute(
+                        "UPDATE symlinks SET virtual_download_id = ?, target_path = ?, "
+                        "arr_host = ?, health = 'ok', last_verified_at = ? WHERE id = ?",
+                        (vd_id, target_path, arr_host, time.time(), existing["id"]),
+                    )
+            else:
+                conn.execute(
+                    "INSERT INTO symlinks "
+                    "(id, virtual_download_id, symlink_path, target_path, "
+                    "arr_host, health, last_verified_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'ok', ?)",
+                    (str(uuid.uuid4()), vd_id, symlink_path, target_path,
+                     arr_host, time.time()),
+                )
 
     def _mark_vd_done(self, vd_id: str):
         """Mark a specific virtual download as done."""

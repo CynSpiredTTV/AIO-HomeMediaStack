@@ -74,6 +74,9 @@ def setup_logging(level: str) -> MemoryLogHandler:
     mem_handler.setFormatter(human_fmt)
 
     root = logging.getLogger()
+    # Clear any existing handlers to prevent duplicates when create_app()
+    # is called multiple times (uvicorn imports the module then starts it)
+    root.handlers.clear()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
     root.addHandler(stdout_handler)
     root.addHandler(mem_handler)
@@ -200,10 +203,63 @@ def create_app() -> FastAPI:
         interval_hours=settings.repair_interval_hours,
     )
 
-    # FastAPI app
-    app = FastAPI(title="DebridBridge", version="0.1.0")
+    # Lifespan context manager (replaces deprecated on_event)
+    from contextlib import asynccontextmanager
 
-    # Shutdown flag for rejecting new requests during shutdown (BUG-034)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # --- STARTUP ---
+        await run_startup_checks(settings, rd_client, sonarr_client, radarr_client)
+
+        await importer.start(num_workers=settings.import_workers)
+        repair_worker.start()
+
+        # Start WebDAV + rclone mount
+        try:
+            from debridbridge.webdav.server import start_webdav_server
+            from debridbridge.mount.manager import MountManager
+
+            loop = asyncio.get_event_loop()
+            start_webdav_server(db, rd_client, port=settings.webdav_port, loop=loop)
+            logger.info("WebDAV server started on port %d", settings.webdav_port)
+
+            mount_mgr = MountManager(
+                mount_path=settings.mount_path,
+                webdav_port=settings.webdav_port,
+            )
+            mount_mgr.preflight_check()
+            mount_mgr.start()
+            app.state.mount_manager = mount_mgr
+            logger.info("rclone mount started at %s", settings.mount_path)
+        except RuntimeError as e:
+            logger.warning("Mount not available: %s", e)
+            logger.warning("Running without FUSE mount (WebDAV-only mode)")
+        except Exception:
+            logger.exception("Failed to start WebDAV/mount")
+
+        yield  # App is running
+
+        # --- SHUTDOWN ---
+        logger.info("Shutting down DebridBridge...")
+        app.state.shutting_down = True
+
+        logger.info("Draining import queue (up to 30s)...")
+        await importer.stop(timeout=30)
+        repair_worker.stop()
+
+        mount_mgr = getattr(app.state, "mount_manager", None)
+        if mount_mgr:
+            mount_mgr.stop()
+
+        await rd_client.close()
+        await sonarr_client.close()
+        await radarr_client.close()
+        db.close()
+
+    # FastAPI app with lifespan
+    app = FastAPI(title="DebridBridge", version="0.1.0", lifespan=lifespan)
+
+    # Shutdown flag
     app.state.shutting_down = False
 
     # Store shared objects on app state
@@ -240,67 +296,6 @@ def create_app() -> FastAPI:
     async def root():
         from fastapi.responses import RedirectResponse
         return RedirectResponse(url="/ui/")
-
-    @app.on_event("startup")
-    async def startup():
-        # Run startup health checks (BUG-033)
-        await run_startup_checks(settings, rd_client, sonarr_client, radarr_client)
-
-        # Start import pipeline workers
-        await importer.start(num_workers=settings.import_workers)
-
-        # Start repair scheduler
-        repair_worker.start()
-
-        # Start WebDAV + rclone mount
-        try:
-            from debridbridge.webdav.server import start_webdav_server
-            from debridbridge.mount.manager import MountManager
-
-            loop = asyncio.get_event_loop()
-            start_webdav_server(db, rd_client, port=settings.webdav_port, loop=loop)
-            logger.info("WebDAV server started on port %d", settings.webdav_port)
-
-            mount_mgr = MountManager(
-                mount_path=settings.mount_path,
-                webdav_port=settings.webdav_port,
-            )
-            mount_mgr.preflight_check()
-            mount_mgr.start()
-            app.state.mount_manager = mount_mgr
-            logger.info("rclone mount started at %s", settings.mount_path)
-        except RuntimeError as e:
-            logger.warning("Mount not available: %s", e)
-            logger.warning("Running without FUSE mount (WebDAV-only mode)")
-        except Exception:
-            logger.exception("Failed to start WebDAV/mount")
-
-    @app.on_event("shutdown")
-    async def shutdown():
-        logger.info("Shutting down DebridBridge...")
-
-        # Stop accepting new qBit submissions (BUG-034)
-        app.state.shutting_down = True
-
-        # Drain import queue with 30s timeout (BUG-034)
-        logger.info("Draining import queue (up to 30s)...")
-        await importer.stop(timeout=30)
-
-        # Stop repair worker
-        repair_worker.stop()
-
-        # Stop rclone mount
-        mount_mgr = getattr(app.state, "mount_manager", None)
-        if mount_mgr:
-            mount_mgr.stop()
-
-        # Close HTTP clients
-        await rd_client.close()
-        await sonarr_client.close()
-        await radarr_client.close()
-
-        # Close database
-        db.close()
 
     return app
 

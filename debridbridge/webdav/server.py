@@ -122,6 +122,12 @@ class RDStreamFile(DAVNonCollection):
         self.rd_link = rd_link
         self.file_size = file_size
 
+    def support_etag(self):
+        return False
+
+    def get_etag(self):
+        return None
+
     def get_content_length(self):
         return self.file_size
 
@@ -174,8 +180,13 @@ class TorrentFolder(DAVCollection):
     def __init__(self, path, environ, torrent_name, files):
         super().__init__(path, environ)
         self.torrent_name = torrent_name
-        # files: list of (filename, rd_link, file_size)
         self._files = files
+
+    def support_etag(self):
+        return False
+
+    def get_etag(self):
+        return None
 
     def get_display_name(self):
         return self.torrent_name
@@ -202,6 +213,12 @@ class AllTorrentsFolder(DAVCollection):
     def __init__(self, path, environ, db):
         super().__init__(path, environ)
         self.db = db
+
+    def support_etag(self):
+        return False
+
+    def get_etag(self):
+        return None
 
     def get_display_name(self):
         return "__all__"
@@ -283,6 +300,12 @@ class RootFolder(DAVCollection):
     def __init__(self, path, environ, db):
         super().__init__(path, environ)
         self.db = db
+
+    def support_etag(self):
+        return False
+
+    def get_etag(self):
+        return None
 
     def get_display_name(self):
         return "DebridBridge"

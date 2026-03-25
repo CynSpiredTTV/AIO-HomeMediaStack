@@ -276,30 +276,27 @@ class ImportPipeline:
         return None
 
     async def _import_episode(self, task, torrent_info, parse_result):
-        """Import a single episode or season pack."""
+        """Import a single episode or season pack via manual import."""
         arr_client = self._get_arr_client(task.category)
         if not arr_client:
             self._mark_failed(task.infohash, f"No Arr client for category: {task.category}")
             return
 
-        # Look up series
         series = await arr_client.lookup_series(parse_result.title, parse_result.year)
         if not series:
             logger.warning("Series not found in Sonarr: %s", parse_result.title)
             self._mark_needs_review(task.infohash, parse_result.confidence)
             return
 
-        # Get selected files
         selected_files = [f for f in torrent_info.files if f.selected]
-
-        # Create symlinks for each file with clean filenames
         season = parse_result.season or 1
+        created_symlinks = []
+
         for rd_file in selected_files:
             orig_filename = rd_file.path.rsplit("/", 1)[-1]
             if not _is_media_file(orig_filename):
                 continue
 
-            # Detect episode number from filename for reformatting
             ep_num = _detect_episode_from_filename(orig_filename)
             clean_filename = _format_episode_filename(
                 series.title, season, ep_num, orig_filename
@@ -311,7 +308,6 @@ class ImportPipeline:
                 sanitise_filename(series.title),
                 f"Season {season:02d}",
             )
-            # BUG-3 fix: preserve full relative path within torrent (not just filename)
             rel_path = rd_file.path.lstrip("/")
             target_path = os.path.join(
                 self.settings.mount_path,
@@ -322,41 +318,47 @@ class ImportPipeline:
             symlink_path = os.path.join(symlink_dir, clean_filename)
 
             _create_symlink(symlink_path, target_path)
+            created_symlinks.append(symlink_path)
 
-            # Record symlink in DB
             vd_id = self._get_or_create_virtual_download(
                 task.infohash, task.category, task.arr_host, season, parse_result.confidence
             )
             self._record_symlink(vd_id, symlink_path, target_path, task.arr_host)
 
-        # Trigger manual import
         vd_id = self._get_or_create_virtual_download(
             task.infohash, task.category, task.arr_host, season, parse_result.confidence
         )
+
+        # Trigger manual import with file paths (not directory)
         import_success = False
-        if parse_result.episodes:
+        if parse_result.episodes and created_symlinks:
             episodes = await arr_client.get_episodes(series.id, season)
-            episode_ids = []
-            for ep in episodes:
-                if ep.episodeNumber in parse_result.episodes:
-                    episode_ids.append(ep.id)
+            episode_ids = [ep.id for ep in episodes if ep.episodeNumber in parse_result.episodes]
 
             if episode_ids:
-                symlink_dir = os.path.join(
-                    self.settings.symlink_path,
-                    task.category,
-                    sanitise_filename(series.title),
-                    f"Season {season:02d}",
-                )
-                import_success = await arr_client.manual_import(
-                    symlink_dir, series.id, season, episode_ids,
-                    download_id=task.infohash,
-                )
+                # Pass each symlink file path individually
+                for sl_path in created_symlinks:
+                    import_success = await arr_client.manual_import(
+                        sl_path, series.id, season, episode_ids,
+                        download_id=task.infohash,
+                    )
+                    if not import_success:
+                        break
         else:
-            # Full season pack — no specific episodes to import, mark done
+            # Season pack — import all created symlinks
             import_success = True
+            if created_symlinks:
+                episodes = await arr_client.get_episodes(series.id, season)
+                if episodes:
+                    episode_ids = [ep.id for ep in episodes]
+                    for sl_path in created_symlinks:
+                        result = await arr_client.manual_import(
+                            sl_path, series.id, season, episode_ids,
+                            download_id=task.infohash,
+                        )
+                        if not result:
+                            import_success = False
 
-        # BUG-022/023 fix: mark specific VD, check import result
         if import_success:
             self._mark_vd_done(vd_id)
         else:
@@ -379,6 +381,7 @@ class ImportPipeline:
             if season_num == 0:
                 continue  # Skip unassigned files
 
+            season_symlinks = []
             for filepath in season_files:
                 filename = filepath.rsplit("/", 1)[-1]
                 if not _is_media_file(filename):
@@ -395,7 +398,6 @@ class ImportPipeline:
                     sanitise_filename(series.title),
                     f"Season {season_num:02d}",
                 )
-                # BUG-3 fix: preserve full relative path within torrent
                 rel_path = filepath.lstrip("/")
                 target_path = os.path.join(
                     self.settings.mount_path,
@@ -406,6 +408,7 @@ class ImportPipeline:
                 symlink_path = os.path.join(symlink_dir, clean_filename)
 
                 _create_symlink(symlink_path, target_path)
+                season_symlinks.append(symlink_path)
 
                 vd_id = self._get_or_create_virtual_download(
                     task.infohash, task.category, task.arr_host,
@@ -413,25 +416,22 @@ class ImportPipeline:
                 )
                 self._record_symlink(vd_id, symlink_path, target_path, task.arr_host)
 
-            # Trigger import for this season
+            # Trigger import for this season — pass file paths, not directory
             vd_id = self._get_or_create_virtual_download(
                 task.infohash, task.category, task.arr_host,
                 season_num, parse_result.confidence,
             )
             episodes = await arr_client.get_episodes(series.id, season_num)
-            if episodes:
+            if episodes and season_symlinks:
                 episode_ids = [ep.id for ep in episodes]
-                symlink_dir = os.path.join(
-                    self.settings.symlink_path,
-                    task.category,
-                    sanitise_filename(series.title),
-                    f"Season {season_num:02d}",
-                )
-                # BUG-022/023: per-season done/failed, check result
-                success = await arr_client.manual_import(
-                    symlink_dir, series.id, season_num, episode_ids,
-                    download_id=f"{task.infohash}:s{season_num}",
-                )
+                success = True
+                for sl_path in season_symlinks:
+                    result = await arr_client.manual_import(
+                        sl_path, series.id, season_num, episode_ids,
+                        download_id=f"{task.infohash}:s{season_num}",
+                    )
+                    if not result:
+                        success = False
                 if success:
                     self._mark_vd_done(vd_id)
                 else:
@@ -487,8 +487,9 @@ class ImportPipeline:
         )
         self._record_symlink(vd_id, symlink_path, target_path, task.arr_host)
 
+        # Pass the actual file path, not the directory
         success = await arr_client.manual_import_movie(
-            symlink_dir, movie.id, download_id=task.infohash,
+            symlink_path, movie.id, download_id=task.infohash,
         )
         if success:
             self._mark_vd_done(vd_id)

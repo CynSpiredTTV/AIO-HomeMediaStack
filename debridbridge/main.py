@@ -2,7 +2,6 @@
 
 import asyncio
 import collections
-import json
 import logging
 import os
 import signal
@@ -40,48 +39,38 @@ class MemoryLogHandler(logging.Handler):
         return list(self._lines)
 
 
-class JSONFormatter(logging.Formatter):
-    """JSON log formatter for structured logging."""
-
-    def format(self, record):
-        log_entry = {
-            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
-            "level": record.levelname,
-            "module": record.name,
-            "message": record.getMessage(),
-        }
-        if record.exc_info and record.exc_info[0]:
-            log_entry["exception"] = self.formatException(record.exc_info)
-        return json.dumps(log_entry)
+_logging_configured = False
+_mem_handler: MemoryLogHandler | None = None
 
 
 def setup_logging(level: str) -> MemoryLogHandler:
-    """Configure structured JSON logging to stdout + in-memory buffer."""
-    json_fmt = JSONFormatter()
+    """Configure logging to stdout + in-memory buffer. Only runs once."""
+    global _logging_configured, _mem_handler
 
-    # Human-readable format for memory handler (web UI)
-    human_fmt = logging.Formatter(
-        "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    if _logging_configured and _mem_handler is not None:
+        return _mem_handler
+
+    fmt = logging.Formatter(
+        "%(asctime)s %(levelname)-5s [%(name)s] %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
 
-    # Stdout handler — JSON formatted (BUG-032 fix)
+    # Stdout handler
     stdout_handler = logging.StreamHandler(sys.stdout)
-    stdout_handler.setFormatter(json_fmt)
+    stdout_handler.setFormatter(fmt)
 
-    # Memory handler for web UI — human readable
-    mem_handler = MemoryLogHandler(max_lines=200)
-    mem_handler.setFormatter(human_fmt)
+    # Memory handler for web UI
+    _mem_handler = MemoryLogHandler(max_lines=200)
+    _mem_handler.setFormatter(fmt)
 
     root = logging.getLogger()
-    # Clear any existing handlers to prevent duplicates when create_app()
-    # is called multiple times (uvicorn imports the module then starts it)
     root.handlers.clear()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
     root.addHandler(stdout_handler)
-    root.addHandler(mem_handler)
+    root.addHandler(_mem_handler)
 
-    return mem_handler
+    _logging_configured = True
+    return _mem_handler
 
 
 async def run_startup_checks(settings, rd_client, sonarr_client, radarr_client):

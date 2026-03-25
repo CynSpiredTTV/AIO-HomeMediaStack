@@ -27,63 +27,192 @@ _sync_rid = 0
 
 @router.post("/auth/login")
 async def auth_login(request: Request):
-    """Always succeed — no real auth needed.
-
-    Radarr/Sonarr send username/password as form data.
-    We accept anything and return the SID cookie.
-    """
+    """Always succeed — matches Decypharr's handleLogin."""
     response = PlainTextResponse("Ok.")
-    response.set_cookie("SID", _SESSION_ID, httponly=True, path="/", samesite="none")
+    response.set_cookie("SID", _SESSION_ID, httponly=True, path="/")
     return response
 
 
-@router.get("/auth/login")
-async def auth_login_get():
-    """Some qBit clients probe with GET first."""
-    response = PlainTextResponse("Ok.")
-    response.set_cookie("SID", _SESSION_ID, httponly=True, path="/", samesite="none")
-    return response
-
-
-# --- App info ---
+# --- App info (versions match Decypharr exactly) ---
 
 @router.get("/app/version")
 async def app_version():
-    return PlainTextResponse("v5.0.0")
+    return PlainTextResponse("v4.3.2")
 
 
 @router.get("/app/webapiVersion")
 async def webapi_version():
-    return PlainTextResponse("2.9.3")
+    return PlainTextResponse("2.7")
+
+
+@router.get("/app/buildInfo")
+async def app_build_info():
+    return {
+        "bitness": 64,
+        "boost": "1.75.0",
+        "libtorrent": "1.2.11.0",
+        "openssl": "1.1.1i",
+        "qt": "5.15.2",
+        "zlib": "1.2.11",
+    }
 
 
 @router.get("/app/preferences")
-async def app_preferences():
-    """Radarr/Sonarr may query preferences during connection test."""
+async def app_preferences(request: Request):
+    """Full qBittorrent preferences — Radarr/Sonarr parse this during connection test."""
+    settings = request.app.state.settings
+    save_path = f"{settings.symlink_path}/"
     return {
-        "save_path": "/downloads/",
-        "temp_path_enabled": False,
-        "temp_path": "/downloads/temp/",
+        "add_trackers": "",
+        "add_trackers_enabled": False,
+        "alt_dl_limit": 10240,
+        "alt_up_limit": 10240,
+        "alternative_webui_enabled": False,
+        "alternative_webui_path": "",
+        "announce_ip": "",
+        "announce_to_all_tiers": True,
+        "announce_to_all_trackers": False,
+        "anonymous_mode": False,
+        "async_io_threads": 4,
+        "auto_delete_mode": 0,
+        "auto_tmm_enabled": False,
+        "autorun_enabled": False,
+        "autorun_program": "",
+        "banned_IPs": "",
+        "bittorrent_protocol": 0,
+        "bypass_auth_subnet_whitelist": "",
+        "bypass_auth_subnet_whitelist_enabled": False,
+        "bypass_local_auth": False,
+        "category_changed_tmm_enabled": False,
+        "checking_memory_use": 32,
+        "create_subfolder_enabled": True,
+        "current_interface_address": "",
+        "current_network_interface": "",
+        "dht": True,
+        "disk_cache": -1,
+        "disk_cache_ttl": 60,
+        "dl_limit": 0,
+        "dont_count_slow_torrents": False,
+        "dyndns_domain": "changeme.dyndns.org",
+        "dyndns_enabled": False,
+        "dyndns_password": "",
+        "dyndns_service": 0,
+        "dyndns_username": "",
+        "embedded_tracker_port": 9000,
+        "enable_coalesce_read_write": True,
+        "enable_embedded_tracker": False,
+        "enable_multi_connections_from_same_ip": False,
+        "enable_os_cache": True,
+        "enable_piece_extent_affinity": False,
+        "enable_super_seeding": False,
+        "enable_upload_suggestions": False,
+        "encryption": 0,
         "export_dir": "",
         "export_dir_fin": "",
+        "file_pool_size": 40,
+        "incomplete_files_ext": False,
+        "ip_filter_enabled": False,
+        "ip_filter_path": "",
+        "ip_filter_trackers": False,
+        "limit_lan_peers": True,
+        "limit_tcp_overhead": False,
+        "limit_utp_rate": True,
+        "listen_port": 31193,
+        "locale": "en",
+        "lsd": True,
+        "mail_notification_auth_enabled": False,
+        "mail_notification_email": "",
+        "mail_notification_enabled": False,
+        "mail_notification_password": "",
+        "mail_notification_sender": "qBittorrentNotification@example.com",
+        "mail_notification_smtp": "smtp.changeme.com",
+        "mail_notification_ssl_enabled": False,
+        "mail_notification_username": "",
+        "max_active_downloads": 3,
+        "max_active_torrents": 5,
+        "max_active_uploads": 3,
         "max_connec": 500,
         "max_connec_per_torrent": 100,
+        "max_ratio": -1,
+        "max_ratio_act": 0,
+        "max_ratio_enabled": False,
+        "max_seeding_time": -1,
+        "max_seeding_time_enabled": False,
         "max_uploads": -1,
         "max_uploads_per_torrent": -1,
-        "dht": True,
+        "outgoing_ports_max": 0,
+        "outgoing_ports_min": 0,
         "pex": True,
-        "lsd": True,
-        "encryption": 0,
-        "queueing_enabled": True,
-        "max_active_downloads": 5,
-        "max_active_torrents": 50,
-        "max_active_uploads": 5,
+        "preallocate_all": False,
+        "proxy_auth_enabled": False,
+        "proxy_ip": "0.0.0.0",
+        "proxy_password": "",
+        "proxy_peer_connections": False,
+        "proxy_port": 8080,
+        "proxy_torrents_only": False,
+        "proxy_type": 0,
+        "proxy_username": "",
+        "queueing_enabled": False,
+        "random_port": False,
+        "recheck_completed_torrents": False,
+        "resolve_peer_countries": True,
+        "rss_auto_downloading_enabled": False,
+        "rss_max_articles_per_feed": 50,
+        "rss_processing_enabled": False,
+        "rss_refresh_interval": 30,
+        "save_path": save_path,
+        "save_path_changed_tmm_enabled": False,
+        "save_resume_data_interval": 60,
+        "scan_dirs": {},
+        "schedule_from_hour": 8,
+        "schedule_from_min": 0,
+        "schedule_to_hour": 20,
+        "schedule_to_min": 0,
+        "scheduler_days": 0,
+        "scheduler_enabled": False,
+        "send_buffer_low_watermark": 10,
+        "send_buffer_watermark": 500,
+        "send_buffer_watermark_factor": 50,
+        "slow_torrent_dl_rate_threshold": 2,
+        "slow_torrent_inactive_timer": 60,
+        "slow_torrent_ul_rate_threshold": 2,
+        "socket_backlog_size": 30,
+        "start_paused_enabled": False,
+        "stop_tracker_timeout": 1,
+        "temp_path": save_path + "temp/",
+        "temp_path_enabled": False,
+        "torrent_changed_tmm_enabled": True,
+        "up_limit": 0,
+        "upload_choking_algorithm": 1,
+        "upload_slots_behavior": 0,
+        "upnp": True,
+        "upnp_lease_duration": 0,
+        "use_https": False,
+        "utp_tcp_mixed_mode": 0,
+        "web_ui_address": "*",
+        "web_ui_ban_duration": 3600,
+        "web_ui_clickjacking_protection_enabled": True,
+        "web_ui_csrf_protection_enabled": True,
+        "web_ui_domain_list": "*",
+        "web_ui_host_header_validation_enabled": True,
+        "web_ui_https_cert_path": "",
+        "web_ui_https_key_path": "",
+        "web_ui_max_auth_fail_count": 5,
+        "web_ui_port": 8080,
+        "web_ui_secure_cookie_enabled": True,
+        "web_ui_session_timeout": 3600,
+        "web_ui_upnp": False,
+        "web_ui_username": "admin",
     }
+
+
+@router.get("/app/shutdown")
+async def app_shutdown():
+    return Response(status_code=200)
 
 
 @router.get("/transfer/info")
 async def transfer_info():
-    """Some clients check transfer info during test."""
     return {
         "connection_status": "connected",
         "dht_nodes": 0,
@@ -202,6 +331,7 @@ async def torrents_add(request: Request):
 
 
 @router.get("/torrents/info")
+@router.post("/torrents/info")
 async def torrents_info(request: Request, hashes: str = "", category: str = ""):
     """Return torrent info — Sonarr/Radarr query by hash or category."""
     db = request.app.state.db
@@ -389,6 +519,73 @@ async def sync_maindata(request: Request, rid: int = 0):
         result["tags"] = []
 
     return result
+
+
+# --- Additional endpoints Radarr/Sonarr may call (matching Decypharr) ---
+
+@router.get("/torrents/categories")
+@router.post("/torrents/categories")
+async def torrents_categories(request: Request):
+    settings = request.app.state.settings
+    categories = {}
+    categories["sonarr"] = {
+        "name": "sonarr",
+        "savePath": f"{settings.symlink_path}/sonarr/",
+    }
+    categories["radarr"] = {
+        "name": "radarr",
+        "savePath": f"{settings.symlink_path}/radarr/",
+    }
+    return categories
+
+
+@router.post("/torrents/createCategory")
+async def create_category(request: Request):
+    return Response(status_code=200)
+
+
+@router.post("/torrents/setCategory")
+async def set_category(request: Request):
+    return Response(status_code=200)
+
+
+@router.get("/torrents/tags")
+@router.post("/torrents/tags")
+async def torrents_tags():
+    return []
+
+
+@router.post("/torrents/createTags")
+async def create_tags():
+    return Response(status_code=200)
+
+
+@router.post("/torrents/addTags")
+async def add_tags():
+    return Response(status_code=200)
+
+
+@router.post("/torrents/removeTags")
+async def remove_tags():
+    return Response(status_code=200)
+
+
+@router.get("/torrents/pause")
+@router.post("/torrents/pause")
+async def torrents_pause():
+    return Response(status_code=200)
+
+
+@router.get("/torrents/resume")
+@router.post("/torrents/resume")
+async def torrents_resume():
+    return Response(status_code=200)
+
+
+@router.get("/torrents/recheck")
+@router.post("/torrents/recheck")
+async def torrents_recheck():
+    return Response(status_code=200)
 
 
 # --- Helpers ---

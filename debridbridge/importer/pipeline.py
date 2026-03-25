@@ -308,22 +308,23 @@ class ImportPipeline:
                 sanitise_filename(series.title),
                 f"Season {season:02d}",
             )
-            rel_path = rd_file.path.lstrip("/")
-            target_path = os.path.join(
-                self.settings.mount_path,
-                "__all__",
-                torrent_info.filename,
-                rel_path,
-            )
             symlink_path = os.path.join(symlink_dir, clean_filename)
 
-            _create_symlink(symlink_path, target_path)
+            # Wait for file on mount before creating symlink
+            actual_path = await _wait_for_file_on_mount(
+                self.settings.mount_path, torrent_info.filename, orig_filename, timeout=60
+            )
+            if not actual_path:
+                logger.warning("File not found on mount: %s/%s", torrent_info.filename, orig_filename)
+                continue
+
+            _create_symlink(symlink_path, actual_path)
             created_symlinks.append(symlink_path)
 
             vd_id = self._get_or_create_virtual_download(
                 task.infohash, task.category, task.arr_host, season, parse_result.confidence
             )
-            self._record_symlink(vd_id, symlink_path, target_path, task.arr_host)
+            self._record_symlink(vd_id, symlink_path, actual_path, task.arr_host)
 
         vd_id = self._get_or_create_virtual_download(
             task.infohash, task.category, task.arr_host, season, parse_result.confidence
@@ -398,23 +399,24 @@ class ImportPipeline:
                     sanitise_filename(series.title),
                     f"Season {season_num:02d}",
                 )
-                rel_path = filepath.lstrip("/")
-                target_path = os.path.join(
-                    self.settings.mount_path,
-                    "__all__",
-                    torrent_info.filename,
-                    rel_path,
-                )
                 symlink_path = os.path.join(symlink_dir, clean_filename)
 
-                _create_symlink(symlink_path, target_path)
+                # Wait for file on mount
+                actual_path = await _wait_for_file_on_mount(
+                    self.settings.mount_path, torrent_info.filename, filename, timeout=60
+                )
+                if not actual_path:
+                    logger.warning("File not found on mount: %s/%s", torrent_info.filename, filename)
+                    continue
+
+                _create_symlink(symlink_path, actual_path)
                 season_symlinks.append(symlink_path)
 
                 vd_id = self._get_or_create_virtual_download(
                     task.infohash, task.category, task.arr_host,
                     season_num, parse_result.confidence,
                 )
-                self._record_symlink(vd_id, symlink_path, target_path, task.arr_host)
+                self._record_symlink(vd_id, symlink_path, actual_path, task.arr_host)
 
             # Trigger import for this season — pass file paths, not directory
             vd_id = self._get_or_create_virtual_download(
@@ -472,15 +474,19 @@ class ImportPipeline:
             task.category,
             folder_name,
         )
-        target_path = os.path.join(
-            self.settings.mount_path,
-            "__all__",
-            torrent_info.filename,
-            filename,
-        )
+
         symlink_path = os.path.join(symlink_dir, sanitise_filename(filename))
 
-        _create_symlink(symlink_path, target_path)
+        # Wait for the file to actually appear on the rclone mount
+        actual_path = await _wait_for_file_on_mount(
+            self.settings.mount_path, torrent_info.filename, filename, timeout=60
+        )
+        if not actual_path:
+            self._mark_failed(task.infohash, f"File never appeared on mount: {filename}")
+            return
+
+        logger.info("Movie symlink: %s → %s", symlink_path, actual_path)
+        _create_symlink(symlink_path, actual_path)
 
         vd_id = self._get_or_create_virtual_download(
             task.infohash, task.category, task.arr_host, None, parse_result.confidence
@@ -677,6 +683,38 @@ def _is_media_file(path: str) -> bool:
     return ext in {"mkv", "mp4", "avi", "m4v", "wmv", "flv", "webm", "ts", "m2ts"}
 
 
+async def _wait_for_file_on_mount(mount_path: str, torrent_name: str, filename: str, timeout: int = 60) -> str | None:
+    """Wait for a file to appear on the rclone mount, like Decypharr does.
+
+    Polls the mount directory until the file shows up or timeout.
+    Returns the full path to the file on the mount, or None if not found.
+    """
+    torrent_dir = os.path.join(mount_path, "__all__", torrent_name)
+
+    for attempt in range(timeout * 2):  # Check every 0.5s
+        # Check if file exists directly
+        direct_path = os.path.join(torrent_dir, filename)
+        if os.path.exists(direct_path):
+            return direct_path
+
+        # For single-file torrents, file might be at torrent_dir level
+        # (torrent_name IS the filename)
+        if os.path.isfile(torrent_dir):
+            return torrent_dir
+
+        # Walk subdirectories (for nested torrents)
+        if os.path.isdir(torrent_dir):
+            for root, dirs, files in os.walk(torrent_dir):
+                for f in files:
+                    if f == filename:
+                        return os.path.join(root, f)
+
+        await asyncio.sleep(0.5)
+
+    logger.warning("Timed out waiting for %s/%s on mount (%ds)", torrent_name, filename, timeout)
+    return None
+
+
 def _create_symlink(symlink_path: str, target_path: str):
     """Create a symlink, handling existing links."""
     os.makedirs(os.path.dirname(symlink_path), exist_ok=True)
@@ -694,4 +732,4 @@ def _create_symlink(symlink_path: str, target_path: str):
         os.remove(symlink_path)
 
     os.symlink(target_path, symlink_path)
-    logger.debug("Created symlink: %s → %s", symlink_path, target_path)
+    logger.info("Created symlink: %s → %s", symlink_path, target_path)

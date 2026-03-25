@@ -200,6 +200,23 @@ class ImportPipeline:
                 ),
             )
 
+        # Pre-populate the WebDAV torrent info cache so rclone can list files
+        # BEFORE we try to wait for them on the mount. Without this, the WebDAV
+        # has no file list → rclone shows empty dir → mount wait times out.
+        selected_files = [f for f in torrent_info.files if f.selected]
+        try:
+            from debridbridge.webdav.server import _torrent_info_cache, _torrent_cache_lock
+            cache_files = []
+            for i, sf in enumerate(selected_files):
+                fname = sf.path.rsplit("/", 1)[-1] if "/" in sf.path else sf.path
+                link = torrent_info.links[i] if i < len(torrent_info.links) else ""
+                cache_files.append((fname, link, sf.bytes))
+            with _torrent_cache_lock:
+                _torrent_info_cache[rd_torrent_id] = (cache_files, time.time())
+            logger.debug("Pre-cached %d files for WebDAV: %s", len(cache_files), torrent_info.filename)
+        except Exception:
+            logger.debug("Failed to pre-cache WebDAV file list", exc_info=True)
+
         # 5. Parse
         file_paths = [f.path for f in torrent_info.files if f.selected]
         parse_result = parse_torrent(torrent_info.filename, file_paths)

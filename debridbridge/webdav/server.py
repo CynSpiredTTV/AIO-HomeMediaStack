@@ -259,37 +259,33 @@ class AllTorrentsFolder(DAVCollection):
     def _build_file_list(self, rd_torrent_id: str, rd_hash: str) -> list[tuple[str, str, int]]:
         """Build (filename, rd_link, file_size) list for a torrent.
 
-        Uses the symlinks table in DB — no RD API calls needed for directory listings.
-        The symlink target_path tells us the file path, and we can derive the filename.
-        RD links are only needed for actual file reads (lazy unrestriction in get_content).
+        Priority order:
+        1. Pre-populated cache (set by import pipeline — has RD links + sizes)
+        2. Symlinks table in DB (has filenames, no RD links)
+        3. Empty list (torrent not ready yet)
+
+        Never makes RD API calls — those would deadlock with the event loop.
         """
+        # 1. Check pipeline-populated cache first (has full file info)
+        with _torrent_cache_lock:
+            cached = _torrent_info_cache.get(rd_torrent_id)
+            if cached and (time.time() - cached[1]) < TORRENT_INFO_CACHE_TTL:
+                return cached[0]
+
+        # 2. Fall back to symlinks table
         files = []
         try:
             with self.db.get_db() as conn:
                 rows = conn.execute(
-                    "SELECT s.target_path, s.symlink_path FROM symlinks s "
+                    "SELECT s.target_path FROM symlinks s "
                     "JOIN virtual_downloads vd ON s.virtual_download_id = vd.id "
                     "WHERE vd.rd_hash = ? AND s.health = 'ok'",
                     (rd_hash,),
                 ).fetchall()
 
             for row in rows:
-                target = row["target_path"]
-                filename = os.path.basename(target)
-                # We don't have the RD link or file size in the symlinks table,
-                # but for directory listings we just need the filename.
-                # File size 0 is fine for PROPFIND — rclone doesn't need it for listing.
-                # The RD link will be resolved lazily on GET via unrestriction.
+                filename = os.path.basename(row["target_path"])
                 files.append((filename, "", 0))
-
-            # If no symlinks yet, try to get info from the torrent files via RD API
-            # but only if we have a cached result (never make a blocking RD call here)
-            if not files:
-                with _torrent_cache_lock:
-                    cached = _torrent_info_cache.get(rd_torrent_id)
-                    if cached and (time.time() - cached[1]) < TORRENT_INFO_CACHE_TTL:
-                        return cached[0]
-
         except Exception:
             logger.debug("Error building file list for %s", rd_hash[:16], exc_info=True)
 

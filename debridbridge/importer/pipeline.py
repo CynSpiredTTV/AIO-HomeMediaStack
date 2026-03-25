@@ -687,18 +687,21 @@ async def _wait_for_file_on_mount(mount_path: str, torrent_name: str, filename: 
     """Wait for a file to appear on the rclone mount, like Decypharr does.
 
     Polls the mount directory until the file shows up or timeout.
-    Returns the full path to the file on the mount, or None if not found.
+    All filesystem operations run in a thread executor to avoid blocking
+    the async event loop (which would deadlock with the WebDAV server).
     """
-    torrent_dir = os.path.join(mount_path, "__all__", torrent_name)
+    loop = asyncio.get_event_loop()
 
-    for attempt in range(timeout * 2):  # Check every 0.5s
+    def _check_mount() -> str | None:
+        """Blocking filesystem check — runs in thread executor."""
+        torrent_dir = os.path.join(mount_path, "__all__", torrent_name)
+
         # Check if file exists directly
         direct_path = os.path.join(torrent_dir, filename)
         if os.path.exists(direct_path):
             return direct_path
 
         # For single-file torrents, file might be at torrent_dir level
-        # (torrent_name IS the filename)
         if os.path.isfile(torrent_dir):
             return torrent_dir
 
@@ -708,7 +711,13 @@ async def _wait_for_file_on_mount(mount_path: str, torrent_name: str, filename: 
                 for f in files:
                     if f == filename:
                         return os.path.join(root, f)
+        return None
 
+    for attempt in range(timeout * 2):  # Check every 0.5s
+        # Run filesystem check in thread pool so we don't block the event loop
+        result = await loop.run_in_executor(None, _check_mount)
+        if result:
+            return result
         await asyncio.sleep(0.5)
 
     logger.warning("Timed out waiting for %s/%s on mount (%ds)", torrent_name, filename, timeout)

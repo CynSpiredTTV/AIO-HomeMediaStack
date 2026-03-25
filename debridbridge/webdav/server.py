@@ -7,6 +7,7 @@ a file is actually read (GET), not on directory listing (PROPFIND).
 import asyncio
 import io
 import logging
+import os
 import threading
 import time
 
@@ -258,38 +259,39 @@ class AllTorrentsFolder(DAVCollection):
     def _build_file_list(self, rd_torrent_id: str, rd_hash: str) -> list[tuple[str, str, int]]:
         """Build (filename, rd_link, file_size) list for a torrent.
 
-        Uses cached torrent info to avoid hitting RD API on every PROPFIND (BUG-5 fix).
+        Uses the symlinks table in DB — no RD API calls needed for directory listings.
+        The symlink target_path tells us the file path, and we can derive the filename.
+        RD links are only needed for actual file reads (lazy unrestriction in get_content).
         """
-        if not rd_torrent_id or not _rd_client:
-            return []
-
-        # Check cache first
-        now = time.time()
-        with _torrent_cache_lock:
-            cached = _torrent_info_cache.get(rd_torrent_id)
-            if cached and (now - cached[1]) < TORRENT_INFO_CACHE_TTL:
-                return cached[0]
-
-        try:
-            info = _run_async(_rd_client.get_torrent_info(rd_torrent_id))
-        except Exception:
-            logger.exception("Failed to get torrent info for %s", rd_torrent_id)
-            return []
-
-        if info.status != "downloaded" or not info.links:
-            return []
-
-        # Match selected files to links (links correspond to selected files in order)
-        selected_files = [f for f in info.files if f.selected]
         files = []
-        for i, sel_file in enumerate(selected_files):
-            if i < len(info.links):
-                filename = sel_file.path.rsplit("/", 1)[-1] if "/" in sel_file.path else sel_file.path
-                files.append((filename, info.links[i], sel_file.bytes))
+        try:
+            with self.db.get_db() as conn:
+                rows = conn.execute(
+                    "SELECT s.target_path, s.symlink_path FROM symlinks s "
+                    "JOIN virtual_downloads vd ON s.virtual_download_id = vd.id "
+                    "WHERE vd.rd_hash = ? AND s.health = 'ok'",
+                    (rd_hash,),
+                ).fetchall()
 
-        # Cache the result
-        with _torrent_cache_lock:
-            _torrent_info_cache[rd_torrent_id] = (files, now)
+            for row in rows:
+                target = row["target_path"]
+                filename = os.path.basename(target)
+                # We don't have the RD link or file size in the symlinks table,
+                # but for directory listings we just need the filename.
+                # File size 0 is fine for PROPFIND — rclone doesn't need it for listing.
+                # The RD link will be resolved lazily on GET via unrestriction.
+                files.append((filename, "", 0))
+
+            # If no symlinks yet, try to get info from the torrent files via RD API
+            # but only if we have a cached result (never make a blocking RD call here)
+            if not files:
+                with _torrent_cache_lock:
+                    cached = _torrent_info_cache.get(rd_torrent_id)
+                    if cached and (time.time() - cached[1]) < TORRENT_INFO_CACHE_TTL:
+                        return cached[0]
+
+        except Exception:
+            logger.debug("Error building file list for %s", rd_hash[:16], exc_info=True)
 
         return files
 

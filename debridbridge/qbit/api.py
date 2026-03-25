@@ -280,16 +280,18 @@ async def torrents_add(request: Request):
         now = time.time()
 
         with db.get_db() as conn:
-            # Check if already exists (BUG-7: avoid duplicate enqueue)
-            existing = conn.execute(
-                "SELECT status FROM torrents WHERE rd_hash = ?", (infohash,)
-            ).fetchone()
-            if existing:
-                logger.info("Torrent already exists: %s (status=%s)", infohash[:16], existing["status"])
-                continue
+            # Clean up any old entries for this hash so retries work fresh.
+            # Sonarr/Radarr handle blacklisting — we just process what they send.
+            conn.execute(
+                "DELETE FROM symlinks WHERE virtual_download_id IN "
+                "(SELECT id FROM virtual_downloads WHERE rd_hash = ?)",
+                (infohash,),
+            )
+            conn.execute("DELETE FROM virtual_downloads WHERE rd_hash = ?", (infohash,))
+            conn.execute("DELETE FROM torrents WHERE rd_hash = ?", (infohash,))
 
             conn.execute(
-                "INSERT OR IGNORE INTO torrents "
+                "INSERT INTO torrents "
                 "(rd_hash, raw_name, status, added_at) "
                 "VALUES (?, ?, 'pending', ?)",
                 (infohash, magnet, now),
@@ -350,7 +352,7 @@ async def torrents_info(request: Request, hashes: str = "", category: str = ""):
                 "WHERE vd.status != 'deleted'"
             ).fetchall()
 
-    return [_row_to_torrent_info(row, settings) for row in rows]
+    return [_row_to_torrent_info(row, settings, db) for row in rows]
 
 
 @router.get("/torrents/properties")
@@ -371,7 +373,7 @@ async def torrents_properties(request: Request, hash: str = ""):
     if not row:
         return {}
 
-    info = _row_to_torrent_info(row, settings)
+    info = _row_to_torrent_info(row, settings, db)
     info["creation_date"] = int(row["created_at"])
     info["addition_date"] = int(row["created_at"])
     info["completion_date"] = int(row["imported_at"] or 0)
@@ -423,12 +425,13 @@ async def torrents_delete(
 
     for h in hash_list:
         with db.get_db() as conn:
-            # Find all VDs: by qbit_hash OR by rd_hash (for multi-season cascade)
+            # Find all VDs for this hash
             vds = conn.execute(
                 "SELECT id FROM virtual_downloads WHERE qbit_hash = ? OR rd_hash = ?",
                 (h, h),
             ).fetchall()
 
+            # Remove symlinks from disk if requested
             if deleteFiles.lower() == "true":
                 for vd in vds:
                     symlinks = conn.execute(
@@ -441,12 +444,14 @@ async def torrents_delete(
                         except OSError:
                             pass
 
-            # Mark all related VDs as deleted
+            # Clean up DB entirely — Sonarr/Radarr handle blacklisting
+            for vd in vds:
+                conn.execute("DELETE FROM symlinks WHERE virtual_download_id = ?", (vd["id"],))
             conn.execute(
-                "UPDATE virtual_downloads SET status = 'deleted' "
-                "WHERE qbit_hash = ? OR rd_hash = ?",
+                "DELETE FROM virtual_downloads WHERE qbit_hash = ? OR rd_hash = ?",
                 (h, h),
             )
+            conn.execute("DELETE FROM torrents WHERE rd_hash = ?", (h,))
 
     return Response(status_code=200)
 
@@ -471,7 +476,7 @@ async def sync_maindata(request: Request, rid: int = 0):
 
     torrents = {}
     for row in rows:
-        info = _row_to_torrent_info(row, settings)
+        info = _row_to_torrent_info(row, settings, db)
         torrents[row["qbit_hash"]] = info
 
     categories = {}
@@ -664,7 +669,7 @@ def _extract_bencode_value(data: bytes, offset: int, depth: int = 0) -> bytes | 
     return None
 
 
-def _row_to_torrent_info(row, settings) -> dict:
+def _row_to_torrent_info(row, settings, db=None) -> dict:
     """Convert a DB row to a qBit torrent info dict."""
     status = row["status"]
     category = row["arr_category"]
@@ -691,14 +696,23 @@ def _row_to_torrent_info(row, settings) -> dict:
     save_path = f"{settings.symlink_path}/{category}/"
     name = row["raw_name"] if row["raw_name"] else ""
 
-    # content_path: Sonarr uses this to find imported files.
-    # For completed downloads, point to the actual symlink directory.
-    # Query symlinks to find the real content path.
-    content_path = save_path + name  # fallback
-    if status == "done":
-        # Try to determine actual content path from symlinks
-        # (This is computed per-call; for performance, could be cached in DB)
-        content_path = save_path  # Sonarr will scan the save_path
+    # content_path must be a subfolder/file UNDER save_path.
+    # Query the actual symlink path to get the real content location.
+    content_path = save_path + name if name else save_path
+    if db and status in ("done", "importing"):
+        try:
+            with db.get_db() as conn:
+                sl = conn.execute(
+                    "SELECT symlink_path FROM symlinks WHERE virtual_download_id = ? LIMIT 1",
+                    (row["id"],),
+                ).fetchone()
+                if sl:
+                    # content_path = the parent directory of the symlink file
+                    # e.g. /mnt/symlinks/radarr/The Simpsons Movie (2007)/
+                    import os
+                    content_path = os.path.dirname(sl["symlink_path"]) + "/"
+        except Exception:
+            pass
 
     return {
         "hash": row["qbit_hash"],

@@ -508,7 +508,7 @@ class ImportPipeline:
         vd_id = self._get_or_create_virtual_download(
             task.infohash, task.category, task.arr_host, None, parse_result.confidence
         )
-        self._record_symlink(vd_id, symlink_path, target_path, task.arr_host)
+        self._record_symlink(vd_id, symlink_path, actual_path, task.arr_host)
 
         # Pass the actual file path, not the directory
         success = await arr_client.manual_import_movie(

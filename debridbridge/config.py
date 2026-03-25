@@ -9,7 +9,7 @@ class Settings(BaseSettings):
 
     # Real-Debrid
     rd_api_key: str = Field(description="Real-Debrid API key")
-    rd_rate_limit: int = Field(default=200, description="RD API rate limit per minute")
+    rd_rate_limit: int = Field(default=250, description="RD API rate limit per minute (RD allows 250)")
 
     # Sonarr
     sonarr_host: str = Field(default="http://sonarr:8989", description="Sonarr URL")

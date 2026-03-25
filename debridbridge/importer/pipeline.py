@@ -16,8 +16,8 @@ from debridbridge.realdebrid.models import RDError
 
 logger = logging.getLogger(__name__)
 
-# Max items in the import queue
-MAX_QUEUE_SIZE = 50
+# Unlimited queue — never reject, always queue
+MAX_QUEUE_SIZE = 0  # 0 = unlimited
 
 
 class ImportTask:
@@ -54,7 +54,7 @@ class ImportPipeline:
         self.radarr_client = radarr_client
         self.db = db
         self.settings = settings
-        self._queue: asyncio.Queue[ImportTask] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
+        self._queue: asyncio.Queue[ImportTask] = asyncio.Queue()  # Unlimited
         self._workers: list[asyncio.Task] = []
         self._running = False
 
@@ -97,22 +97,27 @@ class ImportPipeline:
         arr_host: str,
         save_path: str,
     ):
-        """Add an import task to the queue."""
+        """Add an import task to the queue. Never rejects — always queues."""
         task = ImportTask(infohash, magnet, category, arr_host, save_path)
-        try:
-            self._queue.put_nowait(task)
-            logger.info("Queued import: %s (depth=%d)", infohash[:16], self._queue.qsize())
-        except asyncio.QueueFull:
-            logger.warning(
-                "Import queue full (%d items), rejecting %s",
-                MAX_QUEUE_SIZE,
-                infohash[:16],
-            )
-            self._mark_failed(infohash, "Import queue full")
+        await self._queue.put(task)
+        logger.info("Queued import: %s (depth=%d)", infohash[:16], self._queue.qsize())
 
     async def _worker(self, worker_id: int):
-        """Worker loop — pulls tasks from the queue and processes them."""
+        """Worker loop — pulls tasks from the queue and processes them.
+
+        Each torrent costs ~4 API tokens. Workers wait for enough headroom
+        before picking up the next task, so we never burn tokens we don't have.
+        """
         while self._running:
+            # Wait for enough API headroom before taking a task
+            # Each torrent needs ~5 tokens (addMagnet + selectFiles + 2x info + possible delete)
+            while self._running:
+                used = self.rd_client.limiter.tokens_used
+                limit = self.rd_client.limiter.max_tokens
+                if used + 10 < limit:  # Need at least 10 tokens of headroom
+                    break
+                await asyncio.sleep(1)
+
             try:
                 task = await asyncio.wait_for(self._queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
@@ -121,7 +126,7 @@ class ImportPipeline:
                 return
 
             try:
-                logger.info("[worker-%d] Processing %s", worker_id, task.infohash[:16])
+                logger.info("[worker-%d] Processing %s (queue=%d)", worker_id, task.infohash[:16], self._queue.qsize())
                 await self._process(task)
             except RDError as e:
                 if e.status_code == 429:
@@ -141,28 +146,27 @@ class ImportPipeline:
             except Exception:
                 logger.exception("[worker-%d] Error processing %s", worker_id, task.infohash[:16])
                 self._mark_failed(task.infohash, "Unexpected error")
+            finally:
+                self._queue.task_done()
 
     async def _process(self, task: ImportTask):
         """Execute the full import pipeline for one torrent.
 
         Steps:
-        1. Check RD cache
-        2. Add magnet to RD
-        3. Select files
-        4. Get torrent info
-        5. Parse torrent name
-        6. Create virtual downloads (split if multi-season)
-        7. Create symlinks
-        8. Trigger Arr manual import
-        """
-        # 1. Check cache
-        cache_result = await self.rd_client.check_cache([task.infohash])
-        if not cache_result.get(task.infohash.lower(), False):
-            logger.warning("Torrent not cached on RD: %s", task.infohash[:16])
-            self._mark_failed(task.infohash, "Not cached on Real-Debrid")
-            return
+        1. Add magnet to RD
+        2. Select files
+        3. Wait for status = downloaded (this IS the cache check now)
+        4. Parse torrent name
+        5. Create virtual downloads (split if multi-season)
+        6. Create symlinks
+        7. Trigger Arr manual import
 
-        # 2. Add magnet
+        Note: RD disabled /torrents/instantAvailability (403).
+        We now determine cache status by adding the magnet and checking
+        if it reaches 'downloaded' quickly. Non-cached torrents will
+        time out or show status 'downloading' and get cleaned up.
+        """
+        # 1. Add magnet
         add_result = await self.rd_client.add_magnet(task.magnet)
         rd_torrent_id = add_result.id
 
@@ -173,10 +177,10 @@ class ImportPipeline:
                 (rd_torrent_id, task.infohash),
             )
 
-        # 3. Select all files
+        # 2. Select all files
         await self.rd_client.select_files(rd_torrent_id, "all")
 
-        # 4. Get torrent info (wait for status = downloaded)
+        # 3. Wait for status = downloaded (cache check happens here now)
         torrent_info = await self._wait_for_ready(rd_torrent_id)
         if torrent_info is None:
             self._mark_failed(task.infohash, "Torrent never became ready on RD")
@@ -231,18 +235,43 @@ class ImportPipeline:
         # (it has season_number=NULL and may be orphaned if season-specific VDs were created)
         self._cleanup_original_vd(task.infohash)
 
-    async def _wait_for_ready(self, rd_torrent_id: str, max_attempts: int = 30):
-        """Poll RD until torrent status is 'downloaded'."""
-        for _ in range(max_attempts):
-            info = await self.rd_client.get_torrent_info(rd_torrent_id)
-            if info.status == "downloaded":
-                return info
-            if info.status in ("error", "dead", "magnet_error", "virus"):
-                logger.error("RD torrent %s status: %s", rd_torrent_id, info.status)
-                return None
-            await asyncio.sleep(1)
+    async def _wait_for_ready(self, rd_torrent_id: str):
+        """Check if torrent is cached by waiting briefly then checking once.
 
-        logger.error("RD torrent %s timed out waiting for ready", rd_torrent_id)
+        Cached torrents on RD go from waiting_files_selection → downloaded
+        almost instantly after selectFiles. We wait 2 seconds then check.
+        If not downloaded, wait 3 more seconds and check one final time.
+        Total: 2 API calls, 5 seconds max. Minimal token usage.
+
+        Non-cached torrents are deleted from RD to avoid cluttering the list.
+        """
+        # First check after 2 seconds — enough for most cached torrents
+        await asyncio.sleep(2)
+        info = await self.rd_client.get_torrent_info(rd_torrent_id)
+
+        if info.status == "downloaded":
+            return info
+
+        if info.status in ("error", "dead", "magnet_error", "virus"):
+            logger.error("RD torrent %s status: %s", rd_torrent_id, info.status)
+            return None
+
+        # Second check after 3 more seconds — for slower cached content
+        await asyncio.sleep(3)
+        info = await self.rd_client.get_torrent_info(rd_torrent_id)
+
+        if info.status == "downloaded":
+            return info
+
+        # Not cached — still downloading/queued after 5 seconds
+        logger.warning(
+            "Torrent %s not cached on RD (status=%s after 5s), removing",
+            rd_torrent_id, info.status,
+        )
+        try:
+            await self.rd_client.delete_torrent(rd_torrent_id)
+        except Exception:
+            logger.debug("Failed to delete uncached torrent from RD", exc_info=True)
         return None
 
     async def _import_episode(self, task, torrent_info, parse_result):

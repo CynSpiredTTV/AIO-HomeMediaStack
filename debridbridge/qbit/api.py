@@ -279,18 +279,6 @@ async def torrents_add(request: Request):
         qbit_hash = infohash.lower()
         now = time.time()
 
-        # BUG-018 fix: Check RD cache BEFORE inserting
-        is_cached = True
-        if rd_client:
-            try:
-                cache_result = await rd_client.check_cache([infohash])
-                is_cached = cache_result.get(infohash.lower(), False)
-            except Exception:
-                logger.exception("Failed to check RD cache for %s", infohash[:16])
-                is_cached = False
-
-        initial_status = "pending" if is_cached else "failed"
-
         with db.get_db() as conn:
             # Check if already exists (BUG-7: avoid duplicate enqueue)
             existing = conn.execute(
@@ -303,23 +291,19 @@ async def torrents_add(request: Request):
             conn.execute(
                 "INSERT OR IGNORE INTO torrents "
                 "(rd_hash, raw_name, status, added_at) "
-                "VALUES (?, ?, ?, ?)",
-                (infohash, magnet, "pending" if is_cached else "dead", now),
+                "VALUES (?, ?, 'pending', ?)",
+                (infohash, magnet, now),
             )
             conn.execute(
                 "INSERT OR IGNORE INTO virtual_downloads "
                 "(id, rd_hash, arr_category, arr_host, qbit_hash, status, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (str(uuid.uuid4()), infohash, category, arr_host, qbit_hash, initial_status, now),
+                "VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+                (str(uuid.uuid4()), infohash, category, arr_host, qbit_hash, now),
             )
 
-        if not is_cached:
-            logger.warning("Torrent NOT cached on RD, marking failed: %s", infohash[:16])
-            continue
-
         logger.info(
-            "Torrent added: hash=%s category=%s cached=%s",
-            infohash[:16], category, is_cached,
+            "Torrent added: hash=%s category=%s",
+            infohash[:16], category,
         )
 
         # Queue for import pipeline (non-blocking)

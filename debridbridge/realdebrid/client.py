@@ -101,31 +101,17 @@ class RDClient:
     async def check_cache(self, hashes: list[str]) -> dict[str, bool]:
         """Check instant availability for a list of hashes.
 
-        Batches up to 40 hashes per call. Returns dict of hash -> is_cached.
-        Cost: 1 token per batch of up to 40 hashes.
+        RD disabled /torrents/instantAvailability (returns 403).
+        New approach: add the magnet, select files, check if status becomes
+        'downloaded' quickly. If so, it's cached. If not, delete and return False.
+
+        For now, we return True for all hashes and let the pipeline handle
+        non-cached torrents during the add→select→wait flow. This avoids
+        wasting tokens on a broken endpoint.
         """
-        result: dict[str, bool] = {}
-
-        # Process in batches of 40
-        for i in range(0, len(hashes), 40):
-            batch = hashes[i : i + 40]
-            hash_path = "/".join(h.lower() for h in batch)
-            resp = await self._request("GET", f"/torrents/instantAvailability/{hash_path}")
-
-            data = resp.json()
-            for h in batch:
-                h_lower = h.lower()
-                entry = data.get(h_lower, [])
-                # Cached if rd array is non-empty
-                if isinstance(entry, dict):
-                    rd_list = entry.get("rd", [])
-                    result[h_lower] = len(rd_list) > 0
-                elif isinstance(entry, list):
-                    result[h_lower] = len(entry) > 0
-                else:
-                    result[h_lower] = False
-
-        return result
+        # Always return True — actual cache status is determined in the pipeline
+        # when we add_magnet + select_files and check if status reaches 'downloaded'
+        return {h.lower(): True for h in hashes}
 
     async def add_magnet(self, magnet: str) -> AddMagnetResponse:
         """POST /torrents/addMagnet — add a magnet link. Cost: 1 token."""
